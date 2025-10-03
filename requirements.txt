@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+groq
+requests
+pydantic-settings
+xhtml2pdf
+SQLAlchemy
+mysql-connector-python
+python-docx
+html2docx
+markdown2
