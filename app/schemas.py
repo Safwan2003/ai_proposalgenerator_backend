@@ -26,8 +26,9 @@ class SectionVersion(BaseModel):
 class SectionBase(BaseModel):
     title: str
     contentHtml: str
-    order: int
     image_placement: Optional[str] = None
+    mermaid_chart: Optional[str] = None
+    layout: Optional[str] = None
 
 class SectionCreate(SectionBase):
     images: List[str] = []
@@ -36,6 +37,8 @@ class Section(SectionBase):
     id: int
     image_urls: List[str]
     versions: List[SectionVersion] = []
+    mermaid_chart: Optional[str] = None
+    layout: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -67,6 +70,8 @@ class SectionUpdate(BaseModel):
     title: Optional[str] = None
     contentHtml: Optional[str] = None
     image_placement: Optional[str] = None
+    mermaid_chart: Optional[str] = None
+    layout: Optional[str] = None
 
 class ReorderSection(BaseModel):
     sectionId: int
@@ -85,3 +90,15 @@ class ImageCreate(BaseModel):
 
 class ImageDelete(BaseModel):
     url: str
+
+class GenerateChartRequest(BaseModel):
+    description: str
+    chart_type: str # 'flowchart' or 'gantt'
+
+class UpdateChartRequest(BaseModel):
+    prompt: str
+    current_chart_code: str
+
+class GenerateChartForSectionRequest(BaseModel):
+    description: str
+    chart_type: str

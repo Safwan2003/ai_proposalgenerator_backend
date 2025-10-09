@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str
     PIXABAY_API_KEY: str
 
+
     class Config:
         case_sensitive = True
         env_file = ".env"

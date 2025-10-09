@@ -9,6 +9,7 @@ from app.agents.content_agent import content_agent
 from app.agents.design_agent import design_agent
 from app.agents.automation_agent import automation_agent
 from app.agents.export_agent import export_agent
+from app.agents.diagram_agent import diagram_agent
 
 router = APIRouter()
 
@@ -130,6 +131,14 @@ def get_suggestions(context: str):
     """Get smart suggestions for a proposal section."""
     return automation_agent.get_smart_suggestions(context)
 
+@router.post("/{proposal_id}/sections/{section_id}/suggest-chart", response_model=str)
+def suggest_chart_for_section(section_id: int, db: Session = Depends(get_db)):
+    """Suggest a chart type for a section."""
+    section = crud.get_section(db=db, section_id=section_id)
+    if section is None:
+        raise HTTPException(status_code=404, detail="Section not found")
+    return diagram_agent.suggest_chart_type(section.contentHtml)
+
 @router.post("/{proposal_id}/expand-bullets")
 def expand_bullets(bullet_points: List[str]):
     """Expand bullet points into a paragraph."""
@@ -173,11 +182,17 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
             return 'col-span-1'
         if placement == 'inline-right':
             return 'col-span-1 col-start-2'
+        if placement == 'two-column-left':
+            return 'col-span-2'
+        if placement == 'two-column-right':
+            return 'col-span-2 col-start-3'
+        if placement == 'three-column':
+            return 'col-span-3'
         return 'col-span-1'
 
-    for section in sorted(db_proposal.sections, key=lambda s: s.order):
+    for section in sorted(db_proposal.sections, key=lambda s: s.order if s.order is not None else 999):
         # Convert markdown content to HTML
-        html_from_markdown = markdown2.markdown(section.contentHtml)
+        html_from_markdown = markdown2.markdown(section.contentHtml or "")
         
         # Append images to the section's HTML
         images_html = ""
@@ -187,13 +202,26 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
                 placement_class = get_placement_class(section.image_placement)
                 images_html += f'<div class="{placement_class}"><img src="{image.url}" alt="Proposal Image" style="max-width: 100%; height: auto; margin-top: 1rem; border-radius: 8px;" /></div>'
             images_html += '</div>'
+
+        # Append mermaid chart to the section's HTML
+        mermaid_html = ""
+        if section.mermaid_chart:
+            mermaid_html = f'<div class="mermaid">{section.mermaid_chart}</div>'
         
+        # Get layout class
+        layout_class = ""
+        if section.layout == 'two-column':
+            layout_class = "two-column"
+
         # Combine title, converted content, and images for the section
         body_content += f"""
-            <div class="proposal-section">
+            <div class="proposal-section {layout_class}">
                 <h2>{section.title}</h2>
-                {html_from_markdown}
-                {images_html}
+                <div class="content-wrapper">
+                    {html_from_markdown}
+                    {images_html}
+                    {mermaid_html}
+                </div>
             </div>
         """
 
@@ -213,6 +241,7 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
             .col-span-1 {{ grid-column: span 1 / span 1; }}
             .col-start-2 {{ grid-column-start: 2; }}
             .mt-4 {{ margin-top: 1rem; }}
+            .two-column .content-wrapper {{ column-count: 2; column-gap: 2rem; }}
             {db_proposal.custom_css or ""}
         </style>
     </head>
@@ -221,6 +250,8 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
             <h1>Proposal for {db_proposal.clientName}</h1>
             {body_content}
         </div>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+        <script>mermaid.initialize({{startOnLoad:true}});</script>
     </body>
     </html>
     """
@@ -244,3 +275,73 @@ def export_proposal(proposal_id: int, format: str = "docx", db: Session = Depend
         raise HTTPException(status_code=500, detail="Failed to generate export file")
 
     return {"download_url": file_path}
+
+@router.post("/{proposal_id}/sections/generate-chart", response_model=schemas.Proposal)
+def generate_chart_section(proposal_id: int, request: schemas.GenerateChartRequest, db: Session = Depends(get_db)):
+    """Generate a new section with a Mermaid chart."""
+    db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
+    if db_proposal is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    if request.chart_type == 'flowchart':
+        chart_code = diagram_agent.generate_flowchart(request.description)
+        title = "Flowchart"
+    elif request.chart_type == 'gantt':
+        chart_code = diagram_agent.generate_gantt_chart(request.description)
+        title = "Gantt Chart"
+    else:
+        raise HTTPException(status_code=400, detail="Invalid chart type")
+
+    if not chart_code:
+        raise HTTPException(status_code=422, detail="AI failed to generate valid Mermaid chart code. Please try a different description or chart type.")
+
+    new_section_data = schemas.SectionCreate(
+        title=title,
+        contentHtml="",
+        mermaid_chart=chart_code,
+        order=len(db_proposal.sections) + 1
+    )
+    crud.create_section(db=db, proposal_id=proposal_id, section=new_section_data)
+
+    return crud.get_proposal(db=db, proposal_id=proposal_id)
+
+@router.post("/{proposal_id}/sections/{section_id}/update-chart", response_model=schemas.Section)
+def update_chart_section(proposal_id: int, section_id: int, request: schemas.UpdateChartRequest, db: Session = Depends(get_db)):
+    """Update a section's Mermaid chart using AI."""
+    db_section = crud.get_section(db=db, section_id=section_id)
+    if db_section is None:
+        raise HTTPException(status_code=404, detail="Section not found")
+
+    updated_chart_code = diagram_agent.update_chart(
+        prompt=request.prompt,
+        current_chart_code=request.current_chart_code
+    )
+
+    if not updated_chart_code:
+        raise HTTPException(status_code=500, detail="Failed to update chart")
+
+    section_update = schemas.SectionUpdate(mermaid_chart=updated_chart_code)
+    updated_section = crud.update_section(db=db, section_id=section_id, section=section_update)
+    return updated_section
+
+@router.post("/{proposal_id}/sections/{section_id}/generate-chart", response_model=schemas.Section)
+def generate_chart_for_section(proposal_id: int, section_id: int, request: schemas.GenerateChartForSectionRequest, db: Session = Depends(get_db)):
+    """Generate a chart and add it to an existing section."""
+    db_section = crud.get_section(db=db, section_id=section_id)
+    if db_section is None:
+        raise HTTPException(status_code=404, detail="Section not found")
+
+    if request.chart_type == 'flowchart':
+        chart_code = diagram_agent.generate_flowchart(request.description)
+    elif request.chart_type == 'gantt':
+        chart_code = diagram_agent.generate_gantt_chart(request.description)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid chart type")
+
+    if not chart_code:
+        raise HTTPException(status_code=422, detail="AI failed to generate valid Mermaid chart code. Please try a different description or chart type.")
+
+    section_update = schemas.SectionUpdate(mermaid_chart=chart_code)
+    updated_section = crud.update_section(db=db, section_id=section_id, section=section_update)
+    
+    return updated_section

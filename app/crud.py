@@ -1,9 +1,9 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from . import models, schemas
 from typing import List
 
 def get_proposal(db: Session, proposal_id: int):
-    return db.query(models.Proposal).filter(models.Proposal.id == proposal_id).first()
+    return db.query(models.Proposal).options(joinedload(models.Proposal.sections).joinedload(models.Section.images)).filter(models.Proposal.id == proposal_id).first()
 
 def get_proposals(db: Session, skip: int = 0, limit: int = 100):
     return db.query(models.Proposal).offset(skip).limit(limit).all()
@@ -21,9 +21,13 @@ def get_section(db: Session, section_id: int):
 def create_section(db: Session, proposal_id: int, section: schemas.SectionCreate):
     section_data = section.dict()
     image_urls = section_data.pop("images", [])
+    mermaid_chart = section_data.pop("mermaid_chart", None)
     
     db_section = models.Section(**section_data, proposal_id=proposal_id)
     
+    if mermaid_chart:
+        db_section.mermaid_chart = mermaid_chart
+
     for url in image_urls:
         db_section.images.append(models.Image(url=url))
         

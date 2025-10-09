@@ -29,6 +29,8 @@ class Section(Base):
     contentHtml = Column(Text)
     order = Column(Integer)
     image_placement = Column(String(50), nullable=True)
+    mermaid_chart = Column(Text, nullable=True)
+    layout = Column(String(50), nullable=True)
     proposal_id = Column(Integer, ForeignKey("proposals.id"))
 
     proposal = relationship("Proposal", back_populates="sections")

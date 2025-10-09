@@ -11,3 +11,4 @@ mysql-connector-python
 python-docx
 html2docx
 markdown2
+json-repair
