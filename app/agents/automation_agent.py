@@ -29,7 +29,7 @@ class AutomationAgent:
                         "content": prompt,
                     }
                 ],
-                model="llama-3.1-8b-instant",
+                model=os.environ.get("GROQ_DEFAULT_MODEL_NAME", "llama-3.1-8b-instant"),
                 temperature=0.7,
             )
             suggestions = chat_completion.choices[0].message.content

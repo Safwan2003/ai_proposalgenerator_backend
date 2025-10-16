@@ -1,9 +1,9 @@
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, selectinload
 from . import models, schemas
 from typing import List
 
 def get_proposal(db: Session, proposal_id: int):
-    return db.query(models.Proposal).options(joinedload(models.Proposal.sections).joinedload(models.Section.images)).filter(models.Proposal.id == proposal_id).first()
+    return db.query(models.Proposal).options(selectinload(models.Proposal.sections).selectinload(models.Section.images)).filter(models.Proposal.id == proposal_id).first()
 
 def get_proposals(db: Session, skip: int = 0, limit: int = 100):
     return db.query(models.Proposal).offset(skip).limit(limit).all()
@@ -20,7 +20,7 @@ def get_section(db: Session, section_id: int):
 
 def create_section(db: Session, proposal_id: int, section: schemas.SectionCreate):
     section_data = section.dict()
-    image_urls = section_data.pop("images", [])
+    image_objects = section_data.pop("images", [])
     mermaid_chart = section_data.pop("mermaid_chart", None)
     
     db_section = models.Section(**section_data, proposal_id=proposal_id)
@@ -28,8 +28,17 @@ def create_section(db: Session, proposal_id: int, section: schemas.SectionCreate
     if mermaid_chart:
         db_section.mermaid_chart = mermaid_chart
 
-    for url in image_urls:
-        db_section.images.append(models.Image(url=url))
+    for img in image_objects:
+        # Handle both dict and ImageObject cases
+        url = img.get('url') if isinstance(img, dict) else img.url
+        alt = img.get('alt') if isinstance(img, dict) else getattr(img, 'alt', None)
+        placement = img.get('placement') if isinstance(img, dict) else getattr(img, 'placement', None)
+        
+        db_section.images.append(models.Image(
+            url=url,
+            alt=alt,
+            placement=placement
+        ))
         
     db.add(db_section)
     db.commit()
@@ -117,4 +126,13 @@ def update_image_placement(db: Session, section_id: int, image_placement: str):
         db.commit()
         db.refresh(db_section)
         return db_section
+    return None
+
+def update_proposal_css(db: Session, proposal_id: int, css: str):
+    db_proposal = get_proposal(db, proposal_id)
+    if db_proposal:
+        db_proposal.custom_css = css
+        db.commit()
+        db.refresh(db_proposal)
+        return db_proposal
     return None

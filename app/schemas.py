@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Union
 from datetime import date, datetime
 from enum import Enum
 
@@ -7,6 +7,11 @@ class PaymentType(str, Enum):
     one_time = "one-time"
     monthly = "monthly"
     recurring = "recurring"
+
+class ImageObject(BaseModel):
+    url: str
+    alt: Optional[str] = None
+    placement: Optional[str] = None
 
 class Image(BaseModel):
     id: int
@@ -31,7 +36,7 @@ class SectionBase(BaseModel):
     layout: Optional[str] = None
 
 class SectionCreate(SectionBase):
-    images: List[str] = []
+    images: List[ImageObject] = []
 
 class Section(SectionBase):
     id: int
@@ -85,6 +90,22 @@ class DesignSuggestion(BaseModel):
     prompt: str
     css: str
 
+    def __init__(self, **data):
+        # Clean any format specifiers in the input data
+        if "prompt" in data:
+            data["prompt"] = str(data["prompt"]).replace("%", "%%")
+        if "css" in data:
+            data["css"] = str(data["css"]).replace("%", "%%")
+        super().__init__(**data)
+        
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "prompt": "Classic Professional",
+                "css": "body { font-family: 'Arial', sans-serif; }"
+            }
+        }
+
 class ImageCreate(BaseModel):
     url: str
 
@@ -102,3 +123,6 @@ class UpdateChartRequest(BaseModel):
 class GenerateChartForSectionRequest(BaseModel):
     description: str
     chart_type: str
+
+class LiveCustomizeRequest(BaseModel):
+    prompt: str

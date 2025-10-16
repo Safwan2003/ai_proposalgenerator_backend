@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Body
 from typing import List
+import html as html_lib
+import re
 from sqlalchemy.orm import Session
 from starlette.responses import HTMLResponse
 import markdown2
@@ -12,10 +14,6 @@ from app.agents.export_agent import export_agent
 from app.agents.diagram_agent import diagram_agent
 
 router = APIRouter()
-
-@router.get("/test")
-def test_endpoint():
-    return {"message": "Test endpoint reached successfully!"}
 
 @router.post("/", response_model=schemas.Proposal)
 def create_proposal(proposal: schemas.ProposalCreate, db: Session = Depends(get_db)):
@@ -37,11 +35,28 @@ def generate_proposal_draft(proposal_id: int, db: Session = Depends(get_db)):
     if db_proposal is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
     
+    # 1. Generate proposal content and design hints from the Content Agent
     generated_sections = content_agent.generate_proposal_draft(db_proposal)
-    
-    for section in db_proposal.sections:
+
+    # Create a temporary, in-memory proposal object for the Design Agent
+    class TempProposal:
+        def __init__(self, proposal, sections):
+            self.clientName = proposal.clientName
+            self.companyName = proposal.companyName
+            self.rfpText = proposal.rfpText
+            self.sections = sections
+
+    temp_proposal = TempProposal(db_proposal, generated_sections)
+
+    # 2. Generate context-aware design from the Design Agent using hints
+    collaborative_css = design_agent.generate_collaborative_design(temp_proposal)
+    crud.update_proposal_css(db=db, proposal_id=proposal_id, css=collaborative_css)
+
+    # 3. Clear out old sections from the database
+    for section in crud.get_proposal(db=db, proposal_id=proposal_id).sections:
         crud.delete_section(db=db, section_id=section.id)
 
+    # 4. Create the new sections in the database
     for section_data in generated_sections:
         crud.create_section(db=db, proposal_id=proposal_id, section=schemas.SectionCreate(**section_data))
 
@@ -145,12 +160,78 @@ def expand_bullets(bullet_points: List[str]):
     return {"expanded_text": automation_agent.expand_bullet_points(bullet_points)}
 
 @router.get("/{proposal_id}/design-suggestions", response_model=List[schemas.DesignSuggestion])
-def get_design_suggestions(proposal_id: int, db: Session = Depends(get_db)):
+async def get_design_suggestions(proposal_id: int, db: Session = Depends(get_db)):
     """Get a list of design prompt suggestions from the AI design agent, based on the proposal content."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
     if db_proposal is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    return design_agent.get_design_suggestions(db_proposal)
+    try:
+        # Get suggestions from design agent
+        suggestions = design_agent.get_design_suggestions(db_proposal)
+        if not suggestions:
+            logger.error("No suggestions returned from design agent")
+            raise HTTPException(
+                status_code=500,
+                detail="No design suggestions were generated. Please try again."
+            )
+        
+        # Process and validate each suggestion
+        valid_suggestions = []
+        for i, suggestion in enumerate(suggestions):
+            try:
+                if not isinstance(suggestion, dict):
+                    logger.error(f"Suggestion {i} is not a dict: {type(suggestion)}")
+                    continue
+                    
+                if "prompt" not in suggestion or "css" not in suggestion:
+                    logger.error(f"Suggestion {i} missing required fields: {suggestion.keys()}")
+                    continue
+                    
+                if not isinstance(suggestion["prompt"], str) or not isinstance(suggestion["css"], str):
+                    logger.error(f"Suggestion {i} has invalid types: prompt={type(suggestion['prompt'])}, css={type(suggestion['css'])}")
+                    continue
+                
+                # Clean any format specifiers
+                prompt = suggestion["prompt"].replace("%", "%%")
+                css = suggestion["css"].replace("%", "%%")
+                
+                # Create validated suggestion
+                valid_suggestions.append(
+                    schemas.DesignSuggestion(
+                        prompt=prompt,
+                        css=css
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error processing suggestion {i}: {str(e)}")
+                continue
+        
+        if not valid_suggestions:
+            logger.error("No valid suggestions after processing")
+            # Return default design if no valid suggestions
+            default = design_agent.get_default_design()[0]
+            return [schemas.DesignSuggestion(
+                prompt=default["prompt"],
+                css=default["css"]
+            )]
+            
+        return valid_suggestions
+        
+    except ValueError as e:
+        logger.error(f"ValueError in design suggestions: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating design suggestions: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in design suggestions: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error: {str(e)}"
+        )
 
 @router.post("/{proposal_id}/apply-design", response_model=schemas.Proposal)
 def apply_design(proposal_id: int, css: str = Body(..., embed=True), db: Session = Depends(get_db)):
@@ -191,39 +272,56 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
         return 'col-span-1'
 
     for section in sorted(db_proposal.sections, key=lambda s: s.order if s.order is not None else 999):
-        # Convert markdown content to HTML
-        html_from_markdown = markdown2.markdown(section.contentHtml or "")
-        
-        # Append images to the section's HTML
-        images_html = ""
-        if section.images:
-            images_html += '<div class="mt-4 grid grid-cols-2 gap-3">';
-            for image in section.images:
-                placement_class = get_placement_class(section.image_placement)
-                images_html += f'<div class="{placement_class}"><img src="{image.url}" alt="Proposal Image" style="max-width: 100%; height: auto; margin-top: 1rem; border-radius: 8px;" /></div>'
-            images_html += '</div>'
+        # Prepare content: unescape HTML entities then decide if it's raw HTML or markdown
+        raw = section.contentHtml or ""
+        raw = html_lib.unescape(raw)
 
-        # Append mermaid chart to the section's HTML
+        # Heuristic: if content already contains HTML tags, treat as HTML; otherwise convert from markdown
+        if re.search(r"<\/?[a-zA-Z][\s\S]*?>", raw):
+            html_from_markdown = raw
+        else:
+            html_from_markdown = markdown2.markdown(raw)
+
+        # Prepare mermaid HTML if present
         mermaid_html = ""
         if section.mermaid_chart:
             mermaid_html = f'<div class="mermaid">{section.mermaid_chart}</div>'
-        
-        # Get layout class
+
+        is_full_width = section.image_placement in ('full-width-top', 'full-width-bottom')
+
+        image_html = ""
+        if is_full_width and section.images:
+            # Image will be a direct child of the non-padded section
+            image_html = f'<div><img src="{section.images[0].url}" alt="{section.title}" style="width:100%; height:auto;" /></div>'
+
+        # Text content is always wrapped in a div with padding
+        text_wrapper = f"""
+        <div style="padding: 2rem 3rem;">
+            <h2 style="font-size:1.4rem; color:#2d3748; margin-bottom:0.75rem;">{section.title}</h2>
+            <div class="content-wrapper" style="font-size:1rem; color:#333; line-height:1.6;">
+                {html_from_markdown}
+                {mermaid_html}
+            </div>
+        </div>
+        """
+
+        # Assemble the section content based on image placement
+        final_section_content = ""
+        if is_full_width:
+            if section.image_placement == 'full-width-top':
+                final_section_content = image_html + text_wrapper
+            else:
+                final_section_content = text_wrapper + image_html
+        else:
+            # For sections without full-width images, just use the padded text wrapper
+            final_section_content = text_wrapper
+
         layout_class = ""
         if section.layout == 'two-column':
             layout_class = "two-column"
 
-        # Combine title, converted content, and images for the section
-        body_content += f"""
-            <div class="proposal-section {layout_class}">
-                <h2>{section.title}</h2>
-                <div class="content-wrapper">
-                    {html_from_markdown}
-                    {images_html}
-                    {mermaid_html}
-                </div>
-            </div>
-        """
+        # The outer section container has no padding, allowing images to be full-width
+        body_content += f'<div class="proposal-section {layout_class}" style="padding:0; overflow: hidden;">{final_section_content}</div>'
 
     # Construct the full HTML document
     html_content = f"""
@@ -234,6 +332,7 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Proposal Preview: {db_proposal.clientName}</title>
         <style>
+            body {{ background-color: #f0f0f0; }}
             .grid {{ display: grid; }}
             .grid-cols-2 {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
             .gap-3 {{ gap: 0.75rem; }}
@@ -242,6 +341,11 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
             .col-start-2 {{ grid-column-start: 2; }}
             .mt-4 {{ margin-top: 1rem; }}
             .two-column .content-wrapper {{ column-count: 2; column-gap: 2rem; }}
+            .proposal-container {{
+                max-width: 1000px;
+                margin: 0 auto;
+                background-color: white;
+            }}
             {db_proposal.custom_css or ""}
         </style>
     </head>
@@ -255,7 +359,7 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
     </body>
     </html>
     """
-    return HTMLResponse(content=html_content)
+    return HTMLResponse(content=html_content, headers={'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'})
 
 @router.post("/{proposal_id}/export")
 def export_proposal(proposal_id: int, format: str = "docx", db: Session = Depends(get_db)):
@@ -341,7 +445,25 @@ def generate_chart_for_section(proposal_id: int, section_id: int, request: schem
     if not chart_code:
         raise HTTPException(status_code=422, detail="AI failed to generate valid Mermaid chart code. Please try a different description or chart type.")
 
-    section_update = schemas.SectionUpdate(mermaid_chart=chart_code)
-    updated_section = crud.update_section(db=db, section_id=section_id, section=section_update)
-    
     return updated_section
+
+@router.post("/{proposal_id}/live-customize", response_model=schemas.DesignSuggestion)
+async def live_customize_design(proposal_id: int, request: schemas.LiveCustomizeRequest, db: Session = Depends(get_db)):
+    """Applies a live customization to the proposal's CSS using AI."""
+    db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
+    if not db_proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    current_css = db_proposal.custom_css or ""
+    
+    # Use the existing customize_design method in the agent
+    new_css = design_agent.customize_design(
+        css=current_css,
+        customization_request=request.prompt
+    )
+
+    if not new_css or new_css == current_css:
+        raise HTTPException(status_code=500, detail="AI could not modify the design. Try a different prompt.")
+
+    # Return the new CSS for live preview
+    return schemas.DesignSuggestion(prompt=request.prompt, css=new_css)

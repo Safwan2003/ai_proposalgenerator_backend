@@ -46,6 +46,8 @@ class Image(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     url = Column(String(255))
+    alt = Column(String(255), nullable=True)
+    placement = Column(String(50), nullable=True)
     section_id = Column(Integer, ForeignKey("sections.id"))
 
     section = relationship("Section", back_populates="images")
