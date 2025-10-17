@@ -160,7 +160,7 @@ def expand_bullets(bullet_points: List[str]):
     return {"expanded_text": automation_agent.expand_bullet_points(bullet_points)}
 
 @router.get("/{proposal_id}/design-suggestions", response_model=List[schemas.DesignSuggestion])
-async def get_design_suggestions(proposal_id: int, db: Session = Depends(get_db)):
+async def get_design_suggestions(proposal_id: int, keywords: str = "", db: Session = Depends(get_db)):
     """Get a list of design prompt suggestions from the AI design agent, based on the proposal content."""
     import logging
     logger = logging.getLogger(__name__)
@@ -170,7 +170,7 @@ async def get_design_suggestions(proposal_id: int, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="Proposal not found")
     try:
         # Get suggestions from design agent
-        suggestions = design_agent.get_design_suggestions(db_proposal)
+        suggestions = design_agent.get_design_suggestions(db_proposal, keywords)
         if not suggestions:
             logger.error("No suggestions returned from design agent")
             raise HTTPException(

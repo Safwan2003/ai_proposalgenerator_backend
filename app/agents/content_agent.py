@@ -60,7 +60,6 @@ class ContentAgent:
             * title (string)
             * contentHtml (string, valid HTML)
             * image_query (short image description)
-            * design_hints: {{ "layout_type": "standard-text", "visual_tone": "professional" }}
         - Use HTML tables for pricing and milestones.
         - Keep tone: professional, elegant, confident, and client-centered.
         """
@@ -106,17 +105,16 @@ class ContentAgent:
                     "mermaid_chart": None,
                     "chart_type": None,
                     "tech_logos": [],
-                    "design_hints": section_data.get("design_hints", {"layout_type": "standard-text", "visual_tone": "professional"}),
                 }
 
                 # Extract tech logos for "Technology Stack"
                 if title.lower().startswith("technology"):
-                    tech_names = self.extract_technologies_from_content(content_html)
+                    techs = self.extract_technologies_from_content(content_html)
                     logos = []
-                    for tech in tech_names:
-                        logo_url = self.get_logo_url_for_tech(tech)
+                    for tech in techs:
+                        logo_url = self.get_logo_url_for_tech(tech.get('slug'))
                         if logo_url:
-                            logos.append({"name": tech, "logo_url": logo_url})
+                            logos.append({"name": tech.get('name'), "logo_url": logo_url})
                     section_obj["tech_logos"] = logos
 
                 processed_sections.append(section_obj)
@@ -199,45 +197,47 @@ class ContentAgent:
 
     # ------------------------------------------------------------------
 
-    def extract_technologies_from_content(self, html: str) -> List[str]:
-        """Extract common technology names from HTML or text."""
+    def extract_technologies_from_content(self, html: str) -> List[Dict[str, str]]:
+        """Extracts technology names and their Simple Icons slugs from HTML using an LLM."""
+        if not client:
+            return []
+
+        # Strip HTML for cleaner analysis
         text = re.sub(r"<[^>]+>", " ", html or "")
-        tech_keywords = [
-            "React", "Next.js", "Node.js", "Express", "Django", "Flask", "MongoDB", "PostgreSQL",
-            "MySQL", "AWS", "Azure", "GCP", "TensorFlow", "PyTorch", "Docker", "Kubernetes", "Redis",
-            "GraphQL", "TypeScript", "JavaScript", "Python", "Java"
+        
+        prompt = f"""
+        Analyze the following text from a technology stack description. 
+        Identify the technologies mentioned and provide their corresponding icon slug from Simple Icons (simpleicons.org).
+        Return a JSON array of objects, where each object has a "name" and "slug".
+        The slug should be the lowercase, brand-friendly version (e.g., "Node.js" is "nodedotjs").
+
+        Text: "{text}"
+
+        Example Output:
+        ```json
+        [
+          {{ "name": "React", "slug": "react" }},
+          {{ "name": "Node.js", "slug": "nodedotjs" }},
+          {{ "name": "PostgreSQL", "slug": "postgresql" }}
         ]
-        return [t for t in tech_keywords if re.search(rf"\b{re.escape(t)}\b", text, re.IGNORECASE)]
+        ```
+        """
+        try:
+            resp = client.chat.completions.create(
+                model=os.getenv("GROQ_DEFAULT_MODEL_NAME", "llama-3.1-8b-instant"),
+                temperature=0.2,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            response_text = resp.choices[0].message.content
+            return json.loads(repair_json(response_text))
+        except Exception as e:
+            logging.error(f"Error extracting technologies with LLM: {e}")
+            return []
 
-    def get_logo_url_for_tech(self, tech_name: str) -> str:
-        """Return logo URLs for common technologies."""
-        logos = {
-            "React": "https://raw.githubusercontent.com/github/explore/main/topics/react/react.png",
-            "Next.js": "https://raw.githubusercontent.com/vercel/next.js/canary/docs/public/favicon/favicon.png",
-            "Node.js": "https://raw.githubusercontent.com/github/explore/main/topics/nodejs/nodejs.png",
-            "Docker": "https://raw.githubusercontent.com/github/explore/main/topics/docker/docker.png",
-            "Kubernetes": "https://raw.githubusercontent.com/github/explore/main/topics/kubernetes/kubernetes.png",
-            "AWS": "https://raw.githubusercontent.com/github/explore/main/topics/aws/aws.png",
-            "GCP": "https://raw.githubusercontent.com/github/explore/main/topics/google-cloud/google-cloud.png",
-            "Azure": "https://raw.githubusercontent.com/github/explore/main/topics/azure/azure.png",
-            "TensorFlow": "https://raw.githubusercontent.com/github/explore/main/topics/tensorflow/tensorflow.png",
-            "PyTorch": "https://raw.githubusercontent.com/github/explore/main/topics/pytorch/pytorch.png",
-            "MongoDB": "https://raw.githubusercontent.com/github/explore/main/topics/mongodb/mongodb.png",
-            "PostgreSQL": "https://raw.githubusercontent.com/github/explore/main/topics/postgresql/postgresql.png",
-            "MySQL": "https://raw.githubusercontent.com/github/explore/main/topics/mysql/mysql.png",
-            "Redis": "https://raw.githubusercontent.com/github/explore/main/topics/redis/redis.png",
-            "GraphQL": "https://raw.githubusercontent.com/github/explore/main/topics/graphql/graphql.png",
-            "TypeScript": "https://raw.githubusercontent.com/github/explore/main/topics/typescript/typescript.png",
-            "JavaScript": "https://raw.githubusercontent.com/github/explore/main/topics/javascript/javascript.png",
-            "Python": "https://raw.githubusercontent.com/github/explore/main/topics/python/python.png",
-            "Java": "https://raw.githubusercontent.com/github/explore/main/topics/java/java.png",
-        }
-
-        if tech_name in logos:
-            return logos[tech_name]
-
-        safe = tech_name.replace(" ", "%20")
-        return f"https://img.shields.io/badge/{safe}-logo-lightgrey?logo={safe}&logoColor=white"
+    def get_logo_url_for_tech(self, tech_slug: str) -> str:
+        """Constructs a URL to the Simple Icons CDN for a given technology slug."""
+        # Use a reliable CDN for Simple Icons
+        return f"https://cdn.jsdelivr.net/npm/simple-icons@v11/icons/{tech_slug}.svg"
 
 
 # Singleton instance for import use

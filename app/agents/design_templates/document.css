@@ -1,0 +1,120 @@
+/*
+   Template: Document-Style
+   Description: A minimalist, clean, document-focused theme inspired by the provided PDF.
+*/
+
+:root {
+  /* These tokens will be injected by the AI */
+  --primary: #1e40af; /* A deep blue for accents */
+  --secondary: #1e3a8a;
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --background: #ffffff;
+  --surface: #ffffff;
+  --border: #e5e7eb;
+  --font-heading: 'Inter', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --proposal-max-width: 900px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #f1f5f9; /* A very light gray page background to lift the white paper */
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.page-shell {
+  padding: 4rem 1rem;
+}
+
+.proposal-container {
+  max-width: var(--proposal-max-width);
+  margin: 0 auto;
+  background: var(--surface);
+  padding: 4rem 5rem;
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+  margin-bottom: 1rem;
+}
+
+h1 { font-size: 2.75rem; margin-bottom: 2rem; color: var(--text-primary); }
+h2 { font-size: 1.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-top: 3rem; }
+h3 { font-size: 1.25rem; font-weight: 600; color: var(--text-primary); margin-top: 2rem; }
+
+p { color: var(--text-secondary); margin-bottom: 1.5rem; }
+
+ul, ol {
+  padding-left: 20px;
+}
+li { margin-bottom: 0.75rem; }
+
+/* Sections */
+.proposal-section {
+  padding: 1rem 0;
+  margin-bottom: 1rem;
+}
+
+/* Images & Diagrams */
+.proposal-section img, .mermaid-wrapper {
+  display: block;
+  width: 100%;
+  margin: 2rem 0;
+  border-radius: 8px;
+}
+
+/* Tech Logos */
+.tech-logos {
+  display: flex;
+  gap: 1.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 1.5rem;
+  padding: 1rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.tech-logos img {
+  height: 32px;
+  width: auto;
+  border: none;
+  border-radius: 0;
+  margin: 0;
+}
+
+/* Tables */
+table.proposal-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 2rem 0;
+}
+table.proposal-table th, table.proposal-table td {
+  padding: 0.75rem 1rem;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+table.proposal-table th {
+  border-bottom-width: 2px;
+}
+
+/* Footer */
+.proposal-footer {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  color: #64748b;
+  text-align: center;
+  font-size: 0.9rem;
+}
