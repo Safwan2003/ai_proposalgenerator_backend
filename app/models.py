@@ -36,10 +36,23 @@ class Section(Base):
     proposal = relationship("Proposal", back_populates="sections")
     images = relationship("Image", back_populates="section", cascade="all, delete-orphan")
     versions = relationship("SectionVersion", back_populates="section", cascade="all, delete-orphan")
+    tech_logos = Column(Text, nullable=True) # Stores JSON string of tech logos
 
     @property
     def image_urls(self):
         return [image.url for image in self.images]
+
+    @property
+    def tech_logos_list(self):
+        import json
+        from app.schemas import TechLogo
+        if self.tech_logos:
+            try:
+                # Ensure that the deserialized objects are of type TechLogo
+                return [TechLogo(**logo_data) for logo_data in json.loads(self.tech_logos)]
+            except json.JSONDecodeError:
+                return []
+        return []
 
 class Image(Base):
     __tablename__ = "images"
@@ -61,3 +74,10 @@ class SectionVersion(Base):
     section_id = Column(Integer, ForeignKey("sections.id"))
 
     section = relationship("Section", back_populates="versions")
+
+class CustomLogo(Base):
+    __tablename__ = "custom_logos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), index=True, unique=True)
+    logo_url = Column(String(255))

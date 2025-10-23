@@ -2,9 +2,6 @@ import os
 import re
 import time
 from groq import Groq
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Initialize Groq client
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
@@ -199,6 +196,20 @@ class DiagramAgent:
         Current chart:
         ```mermaid
         {current_chart_code}
+        ```
+
+        Return the UPDATED diagram in valid Mermaid syntax inside ```mermaid ... ``` blocks.
+        """
+        return self._generate_chart(prompt)
+
+    def fix_chart(self, broken_mermaid_code: str) -> str:
+        """Fixes broken Mermaid syntax using the LLM."""
+        prompt = f"""
+        The following Mermaid syntax is broken and will not render. Please fix it.
+
+        Broken Syntax:
+        ```mermaid
+        {{broken_mermaid_code}}
         ```
 
         Return the UPDATED diagram in valid Mermaid syntax inside ```mermaid ... ``` blocks.

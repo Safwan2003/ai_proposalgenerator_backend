@@ -2,7 +2,6 @@ fastapi
 uvicorn[standard]
 pydantic
 python-dotenv
-groq
 requests
 pydantic-settings
 xhtml2pdf
@@ -12,3 +11,6 @@ python-docx
 html2docx
 markdown2
 json-repair
+autogen
+tavily-python
+openai

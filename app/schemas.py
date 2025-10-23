@@ -28,6 +28,23 @@ class SectionVersion(BaseModel):
     class Config:
         from_attributes = True
 
+class TechLogo(BaseModel):
+    name: str
+    logo_url: str
+
+class CustomLogoBase(BaseModel):
+    name: str
+    logo_url: str
+
+class CustomLogoCreate(CustomLogoBase):
+    pass
+
+class CustomLogo(CustomLogoBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
 class SectionBase(BaseModel):
     title: str
     contentHtml: str
@@ -37,6 +54,7 @@ class SectionBase(BaseModel):
 
 class SectionCreate(SectionBase):
     images: List[ImageObject] = []
+    tech_logos: List[TechLogo] = []
 
 class Section(SectionBase):
     id: int
@@ -44,6 +62,7 @@ class Section(SectionBase):
     versions: List[SectionVersion] = []
     mermaid_chart: Optional[str] = None
     layout: Optional[str] = None
+    tech_logos: List[TechLogo] = Field(default_factory=list, alias="tech_logos_list")
 
     class Config:
         from_attributes = True
@@ -63,14 +82,6 @@ class ProposalBase(BaseModel):
 class ProposalCreate(ProposalBase):
     pass
 
-class Proposal(ProposalBase):
-    id: int
-    sections: List[Section] = []
-    custom_css: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
 class SectionUpdate(BaseModel):
     title: Optional[str] = None
     contentHtml: Optional[str] = None
@@ -86,25 +97,21 @@ class GenerateContentRequest(BaseModel):
     section_id: int
     keywords: str
 
-class DesignSuggestion(BaseModel):
+class DesignTheme(BaseModel):
     prompt: str
-    css: str
+    tokens: dict
 
-    def __init__(self, **data):
-        # Clean any format specifiers in the input data
-        if "prompt" in data:
-            data["prompt"] = str(data["prompt"]).replace("%", "%%")
-        if "css" in data:
-            data["css"] = str(data["css"]).replace("%", "%%")
-        super().__init__(**data)
-        
+
+
+class Proposal(ProposalBase):
+    id: int
+    sections: List[Section] = []
+    custom_css: Optional[str] = None
+    design_themes: List[DesignTheme] = []
+    tech_stack: Optional[List[TechLogo]] = None # Add tech_stack to Proposal schema
+
     class Config:
-        json_schema_extra = {
-            "example": {
-                "prompt": "Classic Professional",
-                "css": "body { font-family: 'Arial', sans-serif; }"
-            }
-        }
+        from_attributes = True
 
 class ImageCreate(BaseModel):
     url: str
@@ -126,3 +133,7 @@ class GenerateChartForSectionRequest(BaseModel):
 
 class LiveCustomizeRequest(BaseModel):
     prompt: str
+
+class EnhanceRequest(BaseModel):
+    action: str
+    tone: str

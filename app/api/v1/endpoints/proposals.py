@@ -6,16 +6,80 @@ from sqlalchemy.orm import Session
 from starlette.responses import HTMLResponse
 import markdown2
 from app import crud, schemas
-from app.database import get_db
+import json
+import os
+from datetime import datetime
 from app.agents.content_agent import content_agent
-from app.agents.design_agent import design_agent
-from app.agents.automation_agent import automation_agent
+from app.database import get_db
+from app.agents.autogen_workflow import run_master_workflow
 from app.agents.export_agent import export_agent
-from app.agents.diagram_agent import diagram_agent
 
 router = APIRouter()
 
-@router.post("/", response_model=schemas.Proposal)
+
+from pydantic import BaseModel
+from typing import Any, Dict
+
+class AiTaskRequest(BaseModel):
+    task_name: str
+    context: Dict[str, Any]
+
+
+
+@router.post("/{proposal_id}/ai-task")
+def perform_ai_task(proposal_id: int, request: AiTaskRequest, db: Session = Depends(get_db)):
+    """Run a generic AI task using the master workflow."""
+    # Fetch proposal or section if needed by the context
+
+
+    if request.task_name in ["enhance_section", "suggest_chart"]:
+        section = crud.get_section(db=db, section_id=request.context.get("section_id"))
+        if not section:
+            raise HTTPException(status_code=404, detail="Section not found")
+        request.context["content"] = section.contentHtml
+
+    # Run the workflow
+    result = run_master_workflow(tool_name=request.task_name, tool_args=request.context)
+
+    if result is None:
+        raise HTTPException(status_code=500, detail=f"AI task '{request.task_name}' failed.")
+
+    # Update the database for tasks that modify content
+    if request.task_name == "enhance_section" or request.task_name == "generate_content":
+        updated_section = crud.update_section(db, section_id=request.context.get("section_id"), section=schemas.SectionUpdate(contentHtml=result))
+        return updated_section
+
+    if request.task_name == "live_customize":
+        return schemas.DesignSuggestion(prompt=request.context.get("prompt"), css=result)
+
+    if request.task_name == "generate_chart" or request.task_name == "fix_chart":
+        return {"chartCode": result}
+
+    # For other tasks, return the direct result
+    return result
+
+
+@router.post("/{proposal_id}/sections/{section_id}/enhance")
+def enhance_section(proposal_id: int, section_id: int, request: schemas.EnhanceRequest, db: Session = Depends(get_db)):
+    """Enhance a section's content using the AI content agent."""
+    section = crud.get_section(db=db, section_id=section_id)
+    if not section:
+        raise HTTPException(status_code=404, detail="Section not found")
+
+    enhanced_content = content_agent.enhance_section(
+        content=section.contentHtml,
+        action=request.action,
+        tone=request.tone
+    )
+
+    if enhanced_content is None:
+        raise HTTPException(status_code=500, detail="AI enhancement failed.")
+
+    updated_section = crud.update_section_content(db, section_id=section_id, content=enhanced_content)
+    return updated_section
+
+
+@router.post("", response_model=schemas.Proposal)
 def create_proposal(proposal: schemas.ProposalCreate, db: Session = Depends(get_db)):
     """Create a new proposal."""
     return crud.create_proposal(db=db, proposal=proposal)
@@ -28,39 +92,115 @@ def get_proposal(proposal_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Proposal not found")
     return db_proposal
 
+
+import logging
+
 @router.post("/{proposal_id}/generate", response_model=schemas.Proposal)
 def generate_proposal_draft(proposal_id: int, db: Session = Depends(get_db)):
-    """Generate a proposal draft using AI."""
+    """Generate a proposal draft using the AutoGen multi-agent workflow."""
     db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
     if db_proposal is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    
-    # 1. Generate proposal content and design hints from the Content Agent
-    generated_sections = content_agent.generate_proposal_draft(db_proposal)
 
-    # Create a temporary, in-memory proposal object for the Design Agent
-    class TempProposal:
-        def __init__(self, proposal, sections):
-            self.clientName = proposal.clientName
-            self.companyName = proposal.companyName
-            self.rfpText = proposal.rfpText
-            self.sections = sections
+    # Convert the SQLAlchemy model to a Pydantic model to use model_dump_json
+    pydantic_proposal = schemas.Proposal.from_orm(db_proposal)
 
-    temp_proposal = TempProposal(db_proposal, generated_sections)
+    try:
+        result = run_master_workflow(
+            tool_name="generate_proposal_draft",
+            tool_args=pydantic_proposal.model_dump()
+        )
 
-    # 2. Generate context-aware design from the Design Agent using hints
-    collaborative_css = design_agent.generate_collaborative_design(temp_proposal)
-    crud.update_proposal_css(db=db, proposal_id=proposal_id, css=collaborative_css)
+        # Accept multiple possible result shapes from the workflow:
+        # 1) dict with key 'sections' -> { 'sections': [...] }
+        # 2) plain list of sections -> [ {...}, ... ]
+        # 3) falsy/None -> treat as generation failure
+        generated_sections = None
+        if isinstance(result, dict) and "sections" in result and isinstance(result["sections"], list):
+            generated_sections = result["sections"]
+        elif isinstance(result, list):
+            # If the workflow returned a raw list of sections
+            generated_sections = result
+        else:
+            logging.error(f"Proposal generation returned unexpected result: {type(result)} - {result}")
 
-    # 3. Clear out old sections from the database
-    for section in crud.get_proposal(db=db, proposal_id=proposal_id).sections:
-        crud.delete_section(db=db, section_id=section.id)
+        if not generated_sections:
+            # Generation failed or produced nothing; save raw workflow output for debugging
+            try:
+                os.makedirs(os.path.join(os.getcwd(), 'temp'), exist_ok=True)
+                dump_path = os.path.join(os.getcwd(), 'temp', f'cleaned_ai_response_{datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")}.json')
+                with open(dump_path, 'w', encoding='utf-8') as f:
+                    json.dump({'workflow_result': result}, f, ensure_ascii=False, indent=2, default=str)
+                logging.info(f"Saved unexpected workflow result to {dump_path}")
+            except Exception as e:
+                logging.error(f"Failed to save workflow result for debugging: {e}")
 
-    # 4. Create the new sections in the database
+            # Try a direct fallback: call the content agent's prompt-based generator
+            try:
+                logging.info("Attempting direct fallback: calling content_agent.generate_proposal_draft")
+                fallback_sections = content_agent.generate_proposal_draft(pydantic_proposal)
+                if isinstance(fallback_sections, list) and fallback_sections:
+                    generated_sections = fallback_sections
+                    logging.info("Fallback content_agent produced sections; will use these to populate the proposal.")
+                else:
+                    logging.warning("Fallback content_agent did not produce sections.")
+            except Exception as e:
+                logging.exception(f"Fallback content generation failed: {e}")
+
+        if not generated_sections:
+            logging.warning("AI proposal content generation produced no sections after fallback. Raising HTTPException.")
+            raise HTTPException(status_code=500, detail="AI proposal content generation failed to produce any sections.")
+
+        # Start transaction: clear out old sections and create new ones
+        for section in list(db_proposal.sections):
+            crud.delete_section(db=db, section_id=section.id)
+
+        for i, section_data in enumerate(generated_sections):
+            # Convert image_urls (List[str]) to images (List[ImageObject])
+            title = section_data.get("title", "").lower()
+            if "image_urls" in section_data and section_data["image_urls"] is not None and "development plan" not in title and "payment milestone" not in title and "user journey" not in title and "workflow" not in title:
+                section_data["images"] = [schemas.ImageObject(url=url) for url in section_data["image_urls"]]
+                del section_data["image_urls"]
+            else:
+                section_data["images"] = []
+
+            # Ensure tech_logos is always a list
+            if "tech_logos" not in section_data or section_data["tech_logos"] is None:
+                section_data["tech_logos"] = []
+
+            crud.create_section(db=db, proposal_id=proposal_id, section=schemas.SectionCreate(**section_data), order=i)
+
+        db.commit()
+
+    except Exception as e:
+        db.rollback()
+        logging.exception("An error occurred during proposal generation")
+        raise HTTPException(status_code=500, detail=f"An error occurred during proposal generation: {e}")
+
+    # Get the updated proposal with new sections
+    updated_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
+
+
+
+    # Extract tech stack logos from the generated sections
+    dynamic_tech_stack_logos = []
     for section_data in generated_sections:
-        crud.create_section(db=db, proposal_id=proposal_id, section=schemas.SectionCreate(**section_data))
+        if section_data.get("title", "").lower().startswith("technology"):
+            dynamic_tech_stack_logos = section_data.get("tech_logos", [])
+            break
+    updated_proposal.tech_stack = dynamic_tech_stack_logos
 
-    return crud.get_proposal(db=db, proposal_id=proposal_id)
+    # Also add the tech_logos to the section itself
+    for section in updated_proposal.sections:
+        if section.title.lower().startswith("technology"):
+            section.tech_logos = json.dumps([schemas.TechLogo(**logo).model_dump() for logo in dynamic_tech_stack_logos])
+        else:
+            # Ensure non-technology sections also have tech_logos as an empty JSON array if not set
+            if section.tech_logos is None:
+                section.tech_logos = "[]"
+
+    return updated_proposal
+
 
 @router.post("/{proposal_id}/sections", response_model=schemas.Proposal)
 def add_new_section(proposal_id: int, section: schemas.SectionCreate, db: Session = Depends(get_db)):
@@ -88,30 +228,22 @@ def delete_section(section_id: int, db: Session = Depends(get_db)):
     crud.delete_section(db=db, section_id=section_id)
     return {"message": "Section deleted successfully"}
 
-@router.post("/{proposal_id}/sections/{section_id}/ai-enhance", response_model=schemas.Section)
-def ai_enhance_section(section_id: int, action: str = "rewrite", tone: str = "professional", db: Session = Depends(get_db)):
-    """Regenerate/enhance a section using AI."""
-    section = crud.get_section(db=db, section_id=section_id)
-    if section is None:
-        raise HTTPException(status_code=404, detail="Section not found")
-    
-    enhanced_content = content_agent.enhance_section(section.contentHtml, action, tone)
-    section_update = schemas.SectionUpdate(contentHtml=enhanced_content)
-    updated_section = crud.update_section(db=db, section_id=section_id, section=section_update)
-    return updated_section
-
 @router.post("/{proposal_id}/sections/{section_id}/images", response_model=schemas.Image)
-def add_image_to_section(section_id: int, image: schemas.ImageCreate, db: Session = Depends(get_db)):
+def add_image_to_section(proposal_id: int, section_id: int, image: schemas.ImageCreate, db: Session = Depends(get_db)):
     """Add an image to a section."""
-    db_image = crud.add_image_to_section(db=db, section_id=section_id, image_url=image.url)
+    db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
+    if db_proposal is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    db_image = crud.add_image_to_section(db=db, proposal_id=proposal_id, section_id=section_id, image_url=image.url)
     if db_image is None:
-        raise HTTPException(status_code=404, detail="Section not found")
+        raise HTTPException(status_code=404, detail="Section not found in this proposal")
     return db_image
 
 @router.delete("/{proposal_id}/sections/{section_id}/images")
-def remove_image_from_section(section_id: int, image: schemas.ImageDelete, db: Session = Depends(get_db)):
+def remove_image_from_section(proposal_id: int, section_id: int, image: schemas.ImageDelete, db: Session = Depends(get_db)):
     """Remove an image from a section."""
-    db_image = crud.remove_image_from_section(db=db, section_id=section_id, image_url=image.url)
+    db_image = crud.remove_image_from_section(db=db, proposal_id=proposal_id, section_id=section_id, image_url=image.url)
     if db_image is None:
         raise HTTPException(status_code=404, detail="Image not found in section")
     return {"message": "Image removed successfully"}
@@ -124,114 +256,24 @@ def update_image_placement(section_id: int, image_placement: str = Body(..., emb
         raise HTTPException(status_code=404, detail="Section not found")
     return db_section
 
-
-@router.post("/proposals/{proposal_id}/sections/generate-content", response_model=schemas.Section)
-def generate_content_for_section(proposal_id: int, request: schemas.GenerateContentRequest, db: Session = Depends(get_db)):
-    """Generate content for a section based on keywords using AI."""
+@router.post("/{proposal_id}/export")
+def export_proposal(proposal_id: int, format: str = "docx", db: Session = Depends(get_db)):
+    """Export a proposal to DOCX or PDF."""
     db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
     if db_proposal is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    
-    section = crud.get_section(db=db, section_id=request.section_id)
-    if section is None:
-        raise HTTPException(status_code=404, detail="Section not found")
 
-    generated_content = content_agent.generate_content_from_keywords(request.keywords)
-    section_update = schemas.SectionUpdate(contentHtml=generated_content)
-    updated_section = crud.update_section(db=db, section_id=request.section_id, section=section_update)
-    return updated_section
+    if format == "docx":
+        file_path = export_agent.export_to_docx(db_proposal)
+    elif format == "pdf":
+        file_path = export_agent.export_to_pdf(db_proposal)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid export format")
 
-@router.get("/{proposal_id}/suggestions")
-def get_suggestions(context: str):
-    """Get smart suggestions for a proposal section."""
-    return automation_agent.get_smart_suggestions(context)
+    if not file_path:
+        raise HTTPException(status_code=500, detail="Failed to generate export file")
 
-@router.post("/{proposal_id}/sections/{section_id}/suggest-chart", response_model=str)
-def suggest_chart_for_section(section_id: int, db: Session = Depends(get_db)):
-    """Suggest a chart type for a section."""
-    section = crud.get_section(db=db, section_id=section_id)
-    if section is None:
-        raise HTTPException(status_code=404, detail="Section not found")
-    return diagram_agent.suggest_chart_type(section.contentHtml)
-
-@router.post("/{proposal_id}/expand-bullets")
-def expand_bullets(bullet_points: List[str]):
-    """Expand bullet points into a paragraph."""
-    return {"expanded_text": automation_agent.expand_bullet_points(bullet_points)}
-
-@router.get("/{proposal_id}/design-suggestions", response_model=List[schemas.DesignSuggestion])
-async def get_design_suggestions(proposal_id: int, keywords: str = "", db: Session = Depends(get_db)):
-    """Get a list of design prompt suggestions from the AI design agent, based on the proposal content."""
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
-    if db_proposal is None:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-    try:
-        # Get suggestions from design agent
-        suggestions = design_agent.get_design_suggestions(db_proposal, keywords)
-        if not suggestions:
-            logger.error("No suggestions returned from design agent")
-            raise HTTPException(
-                status_code=500,
-                detail="No design suggestions were generated. Please try again."
-            )
-        
-        # Process and validate each suggestion
-        valid_suggestions = []
-        for i, suggestion in enumerate(suggestions):
-            try:
-                if not isinstance(suggestion, dict):
-                    logger.error(f"Suggestion {i} is not a dict: {type(suggestion)}")
-                    continue
-                    
-                if "prompt" not in suggestion or "css" not in suggestion:
-                    logger.error(f"Suggestion {i} missing required fields: {suggestion.keys()}")
-                    continue
-                    
-                if not isinstance(suggestion["prompt"], str) or not isinstance(suggestion["css"], str):
-                    logger.error(f"Suggestion {i} has invalid types: prompt={type(suggestion['prompt'])}, css={type(suggestion['css'])}")
-                    continue
-                
-                # Clean any format specifiers
-                prompt = suggestion["prompt"].replace("%", "%%")
-                css = suggestion["css"].replace("%", "%%")
-                
-                # Create validated suggestion
-                valid_suggestions.append(
-                    schemas.DesignSuggestion(
-                        prompt=prompt,
-                        css=css
-                    )
-                )
-            except Exception as e:
-                logger.error(f"Error processing suggestion {i}: {str(e)}")
-                continue
-        
-        if not valid_suggestions:
-            logger.error("No valid suggestions after processing")
-            # Return default design if no valid suggestions
-            default = design_agent.get_default_design()[0]
-            return [schemas.DesignSuggestion(
-                prompt=default["prompt"],
-                css=default["css"]
-            )]
-            
-        return valid_suggestions
-        
-    except ValueError as e:
-        logger.error(f"ValueError in design suggestions: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error generating design suggestions: {str(e)}"
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error in design suggestions: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unexpected error: {str(e)}"
-        )
+    return {"download_url": file_path}
 
 @router.post("/{proposal_id}/apply-design", response_model=schemas.Proposal)
 def apply_design(proposal_id: int, css: str = Body(..., embed=True), db: Session = Depends(get_db)):
@@ -287,12 +329,13 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
         if section.mermaid_chart:
             mermaid_html = f'<div class="mermaid">{section.mermaid_chart}</div>'
 
-        is_full_width = section.image_placement in ('full-width-top', 'full-width-bottom')
-
-        image_html = ""
-        if is_full_width and section.images:
-            # Image will be a direct child of the non-padded section
-            image_html = f'<div><img src="{section.images[0].url}" alt="{section.title}" style="width:100%; height:auto;" /></div>'
+        image_blocks = []
+        if section.images:
+            for img in section.images:
+                placement_class = get_placement_class(img.placement)
+                img_tag = f'<img src="{img.url}" alt="{img.alt or section.title}" style="width:100%; height:auto;" />'
+                image_blocks.append(f'<div class="image-block {placement_class}">{img_tag}</div>')
+        image_html = "".join(image_blocks)
 
         # Text content is always wrapped in a div with padding
         text_wrapper = f"""
@@ -307,14 +350,23 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
 
         # Assemble the section content based on image placement
         final_section_content = ""
-        if is_full_width:
-            if section.image_placement == 'full-width-top':
-                final_section_content = image_html + text_wrapper
-            else:
-                final_section_content = text_wrapper + image_html
+        if section.image_placement == 'full-width-top':
+            final_section_content = image_html + text_wrapper
+        elif section.image_placement == 'full-width-bottom':
+            final_section_content = text_wrapper + image_html
         else:
-            # For sections without full-width images, just use the padded text wrapper
-            final_section_content = text_wrapper
+            # For other placements, embed images within the text_wrapper or default
+            # This assumes that image_html contains all image blocks, and they will be styled by CSS
+            final_section_content = f"""
+            <div style="padding: 2rem 3rem;">
+                <h2 style="font-size:1.4rem; color:#2d3748; margin-bottom:0.75rem;">{section.title}</h2>
+                <div class="content-wrapper" style="font-size:1rem; color:#333; line-height:1.6;">
+                    {image_html}
+                    {html_from_markdown}
+                    {mermaid_html}
+                </div>
+            </div>
+            """
 
         layout_class = ""
         if section.layout == 'two-column':
@@ -355,115 +407,23 @@ def preview_proposal(proposal_id: int, db: Session = Depends(get_db)):
             {body_content}
         </div>
         <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-        <script>mermaid.initialize({{startOnLoad:true}});</script>
+        <script>
+            mermaid.initialize({{
+                startOnLoad:true,
+                theme: 'base',
+                themeVariables: {{
+                    'primaryColor': '#4F46E5',
+                    'primaryTextColor': '#FFFFFF',
+                    'primaryBorderColor': '#4338CA',
+                    'lineColor': '#6D28D9',
+                    'secondaryColor': '#F3F4F6',
+                    'tertiaryColor': '#E5E7EB'
+                }}
+            }});
+        </script>
     </body>
     </html>
     """
     return HTMLResponse(content=html_content, headers={'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'})
 
-@router.post("/{proposal_id}/export")
-def export_proposal(proposal_id: int, format: str = "docx", db: Session = Depends(get_db)):
-    """Export a proposal to DOCX or PDF."""
-    db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
-    if db_proposal is None:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-
-    if format == "docx":
-        file_path = export_agent.export_to_docx(db_proposal)
-    elif format == "pdf":
-        file_path = export_agent.export_to_pdf(db_proposal)
-    else:
-        raise HTTPException(status_code=400, detail="Invalid export format")
-
-    if not file_path:
-        raise HTTPException(status_code=500, detail="Failed to generate export file")
-
-    return {"download_url": file_path}
-
-@router.post("/{proposal_id}/sections/generate-chart", response_model=schemas.Proposal)
-def generate_chart_section(proposal_id: int, request: schemas.GenerateChartRequest, db: Session = Depends(get_db)):
-    """Generate a new section with a Mermaid chart."""
-    db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
-    if db_proposal is None:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-
-    if request.chart_type == 'flowchart':
-        chart_code = diagram_agent.generate_flowchart(request.description)
-        title = "Flowchart"
-    elif request.chart_type == 'gantt':
-        chart_code = diagram_agent.generate_gantt_chart(request.description)
-        title = "Gantt Chart"
-    else:
-        raise HTTPException(status_code=400, detail="Invalid chart type")
-
-    if not chart_code:
-        raise HTTPException(status_code=422, detail="AI failed to generate valid Mermaid chart code. Please try a different description or chart type.")
-
-    new_section_data = schemas.SectionCreate(
-        title=title,
-        contentHtml="",
-        mermaid_chart=chart_code,
-        order=len(db_proposal.sections) + 1
-    )
-    crud.create_section(db=db, proposal_id=proposal_id, section=new_section_data)
-
-    return crud.get_proposal(db=db, proposal_id=proposal_id)
-
-@router.post("/{proposal_id}/sections/{section_id}/update-chart", response_model=schemas.Section)
-def update_chart_section(proposal_id: int, section_id: int, request: schemas.UpdateChartRequest, db: Session = Depends(get_db)):
-    """Update a section's Mermaid chart using AI."""
-    db_section = crud.get_section(db=db, section_id=section_id)
-    if db_section is None:
-        raise HTTPException(status_code=404, detail="Section not found")
-
-    updated_chart_code = diagram_agent.update_chart(
-        prompt=request.prompt,
-        current_chart_code=request.current_chart_code
-    )
-
-    if not updated_chart_code:
-        raise HTTPException(status_code=500, detail="Failed to update chart")
-
-    section_update = schemas.SectionUpdate(mermaid_chart=updated_chart_code)
-    updated_section = crud.update_section(db=db, section_id=section_id, section=section_update)
-    return updated_section
-
-@router.post("/{proposal_id}/sections/{section_id}/generate-chart", response_model=schemas.Section)
-def generate_chart_for_section(proposal_id: int, section_id: int, request: schemas.GenerateChartForSectionRequest, db: Session = Depends(get_db)):
-    """Generate a chart and add it to an existing section."""
-    db_section = crud.get_section(db=db, section_id=section_id)
-    if db_section is None:
-        raise HTTPException(status_code=404, detail="Section not found")
-
-    if request.chart_type == 'flowchart':
-        chart_code = diagram_agent.generate_flowchart(request.description)
-    elif request.chart_type == 'gantt':
-        chart_code = diagram_agent.generate_gantt_chart(request.description)
-    else:
-        raise HTTPException(status_code=400, detail="Invalid chart type")
-
-    if not chart_code:
-        raise HTTPException(status_code=422, detail="AI failed to generate valid Mermaid chart code. Please try a different description or chart type.")
-
-    return updated_section
-
-@router.post("/{proposal_id}/live-customize", response_model=schemas.DesignSuggestion)
-async def live_customize_design(proposal_id: int, request: schemas.LiveCustomizeRequest, db: Session = Depends(get_db)):
-    """Applies a live customization to the proposal's CSS using AI."""
-    db_proposal = crud.get_proposal(db=db, proposal_id=proposal_id)
-    if not db_proposal:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-
-    current_css = db_proposal.custom_css or ""
-    
-    # Use the existing customize_design method in the agent
-    new_css = design_agent.customize_design(
-        css=current_css,
-        customization_request=request.prompt
-    )
-
-    if not new_css or new_css == current_css:
-        raise HTTPException(status_code=500, detail="AI could not modify the design. Try a different prompt.")
-
-    # Return the new CSS for live preview
-    return schemas.DesignSuggestion(prompt=request.prompt, css=new_css)
+# --- The old AI endpoints are now removed, leaving only CRUD and other non-AI endpoints. ---
