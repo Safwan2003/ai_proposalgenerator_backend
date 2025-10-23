@@ -30,8 +30,8 @@ class ContentAgent:
             url = "https://cdn.jsdelivr.net/npm/simple-icons@latest/_data/simple-icons.json"
             response = requests.get(url)
             response.raise_for_status()
-            # Correctly access the list of icons within the JSON structure
-            return response.json().get("icons", [])
+            # The root of the JSON is the list of icons itself.
+            return response.json()
         except Exception as e:
             logging.error(f"Error loading simple-icons data: {e}")
             return []
