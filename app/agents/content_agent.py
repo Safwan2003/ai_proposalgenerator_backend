@@ -5,6 +5,7 @@ import random
 import requests
 import logging
 from typing import List, Dict
+from groq import Groq
 from app.schemas import Proposal
 from json_repair import repair_json
 from fastapi import HTTPException
