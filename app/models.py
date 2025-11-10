@@ -1,5 +1,8 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text, DateTime
+
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Text, Table, Float, Date, DateTime
 from sqlalchemy.orm import relationship
+from sqlalchemy.types import JSON
+
 from .database import Base
 import datetime
 
@@ -28,56 +31,20 @@ class Section(Base):
     title = Column(String(255), index=True)
     contentHtml = Column(Text)
     order = Column(Integer)
+    image_urls = Column(JSON, nullable=True, default=[])
     image_placement = Column(String(50), nullable=True)
     mermaid_chart = Column(Text, nullable=True)
     layout = Column(String(50), nullable=True)
+
+    chart_type = Column(String(50), nullable=True)
+    tech_logos = Column(JSON, nullable=True)
+    custom_logos = Column(JSON, nullable=True)
+
     proposal_id = Column(Integer, ForeignKey("proposals.id"))
-
     proposal = relationship("Proposal", back_populates="sections")
-    images = relationship("Image", back_populates="section", cascade="all, delete-orphan")
-    versions = relationship("SectionVersion", back_populates="section", cascade="all, delete-orphan")
-    tech_logos = Column(Text, nullable=True) # Stores JSON string of tech logos
 
-    @property
-    def image_urls(self):
-        return [image.url for image in self.images]
-
-    @property
-    def tech_logos_list(self):
-        import json
-        from app.schemas import TechLogo
-        if self.tech_logos:
-            try:
-                # Ensure that the deserialized objects are of type TechLogo
-                return [TechLogo(**logo_data) for logo_data in json.loads(self.tech_logos)]
-            except json.JSONDecodeError:
-                return []
-        return []
-
-class Image(Base):
-    __tablename__ = "images"
-
+class UserImage(Base):
+    __tablename__ = "user_images"
     id = Column(Integer, primary_key=True, index=True)
-    url = Column(String(255))
-    alt = Column(String(255), nullable=True)
-    placement = Column(String(50), nullable=True)
-    section_id = Column(Integer, ForeignKey("sections.id"))
-
-    section = relationship("Section", back_populates="images")
-
-class SectionVersion(Base):
-    __tablename__ = "section_versions"
-
-    id = Column(Integer, primary_key=True, index=True)
-    contentHtml = Column(Text)
+    url = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    section_id = Column(Integer, ForeignKey("sections.id"))
-
-    section = relationship("Section", back_populates="versions")
-
-class CustomLogo(Base):
-    __tablename__ = "custom_logos"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), index=True, unique=True)
-    logo_url = Column(String(255))

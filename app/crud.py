@@ -1,169 +1,258 @@
-import json
-from sqlalchemy.orm import Session, selectinload
+import logging
+from sqlalchemy import select, delete
+from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
+from typing import List, Optional
 from . import models, schemas
-from typing import List
 
-def get_proposal(db: Session, proposal_id: int):
-    return db.query(models.Proposal).options(selectinload(models.Proposal.sections).selectinload(models.Section.images)).filter(models.Proposal.id == proposal_id).first()
 
-def get_proposals(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.Proposal).offset(skip).limit(limit).all()
+# ---------------------------------------------------------------------------
+# USER IMAGE CRUD
+# ---------------------------------------------------------------------------
 
-def create_proposal(db: Session, proposal: schemas.ProposalCreate):
-    db_proposal = models.Proposal(**proposal.dict())
-    db.add(db_proposal)
-    db.commit()
-    db.refresh(db_proposal)
-    return db_proposal
-
-def get_section(db: Session, section_id: int):
-    return db.query(models.Section).filter(models.Section.id == section_id).first()
-
-def create_section(db: Session, section: schemas.SectionCreate, proposal_id: int, order: int):
-    db_section = models.Section(
-        title=section.title,
-        contentHtml=section.contentHtml,
-        order=order,
-        image_placement=section.image_placement,
-        mermaid_chart=section.mermaid_chart,
-        layout=section.layout,
-        proposal_id=proposal_id
+async def get_user_images(db: AsyncSession, skip: int = 0, limit: int = 100) -> List[models.UserImage]:
+    """
+    Retrieves a list of user images with pagination.
+    """
+    result = await db.execute(
+        select(models.UserImage)
+        .order_by(models.UserImage.created_at.desc())
+        .offset(skip)
+        .limit(limit)
     )
-    if section.tech_logos:
-        db_section.tech_logos = json.dumps([logo.model_dump() for logo in section.tech_logos])
+    return result.scalars().all()
 
-    db.add(db_section)
-    db.commit()
-    db.refresh(db_section)
+async def create_user_image(db: AsyncSession, image: schemas.UserImageCreate) -> models.UserImage:
+    """
+    Creates a new user image record in the database.
+    """
+    db_image = models.UserImage(url=image.url)
+    db.add(db_image)
+    await db.commit()
+    await db.refresh(db_image)
+    return db_image
 
-    for img in section.images:
-        db_image = models.Image(url=img.url, alt=img.alt, placement=img.placement, section_id=db_section.id)
-        db.add(db_image)
-    db.commit()
-    db.refresh(db_section)
-    return db_section
+async def delete_user_image(db: AsyncSession, image_id: int) -> Optional[models.UserImage]:
+    """
+    Deletes a user image from the database by its ID.
+    """
+    result = await db.execute(select(models.UserImage).filter(models.UserImage.id == image_id))
+    db_image = result.scalar_one_or_none()
+    if db_image:
+        await db.delete(db_image)
+        await db.commit()
+    return db_image
 
-def update_section(db: Session, section_id: int, section: schemas.SectionUpdate):
-    db_section = db.query(models.Section).filter(models.Section.id == section_id).first()
-    if not db_section:
+
+# ---------------------------------------------------------------------------
+# IMAGE DELETION (correct version)
+# ---------------------------------------------------------------------------
+
+async def delete_image_from_section(db: AsyncSession, section_id: int, image_id: int) -> models.Section:
+    section = await get_section(db, section_id)
+    if not section:
+        return None
+    
+    if image_id < len(section.image_urls):
+        section.image_urls.pop(image_id)
+        db.add(section)
+        await db.commit()
+        await db.refresh(section)
+    
+    return section
+
+
+# ---------------------------------------------------------------------------
+# PROPOSAL CRUD
+# ---------------------------------------------------------------------------
+
+async def get_proposal(db: AsyncSession, proposal_id: int) -> Optional[dict]:
+    result = await db.execute(
+        select(models.Proposal).options(
+            selectinload(models.Proposal.sections)
+        ).filter(models.Proposal.id == proposal_id)
+    )
+    proposal = result.scalar_one_or_none()
+    if not proposal:
         return None
 
-    update_data = section.model_dump(exclude_unset=True)
-    if "tech_logos" in update_data and update_data["tech_logos"] is not None:
-        db_section.tech_logos = json.dumps([logo.model_dump() for logo in update_data["tech_logos"]])
-        del update_data["tech_logos"]
-    elif "tech_logos" in update_data and update_data["tech_logos"] is None:
-        db_section.tech_logos = "[]" # Store as empty JSON array string
-        del update_data["tech_logos"]
+    # Sort sections by order
+    sorted_sections = sorted(proposal.sections, key=lambda s: s.order)
 
+    proposal_dict = {
+        "id": proposal.id,
+        "clientName": proposal.clientName,
+        "rfpText": proposal.rfpText,
+        "totalAmount": proposal.totalAmount,
+        "paymentType": proposal.paymentType,
+        "numDeliverables": proposal.numDeliverables,
+        "startDate": proposal.startDate,
+        "endDate": proposal.endDate,
+        "companyName": proposal.companyName,
+        "companyLogoUrl": proposal.companyLogoUrl,
+        "companyContact": proposal.companyContact,
+        "custom_css": proposal.custom_css,
+        "sections": [
+            {
+                "id": section.id,
+                "proposal_id": section.proposal_id,
+                "title": section.title,
+                "contentHtml": section.contentHtml,
+                "order": section.order,
+                "image_placement": section.image_placement,
+                "mermaid_chart": section.mermaid_chart,
+                "layout": section.layout,
+                "chart_type": section.chart_type,
+                "tech_logos": section.tech_logos or [],
+                "images": [{"id": i, "url": url, "alt": "", "placement": section.image_placement or "full-width-top"} for i, url in enumerate(section.image_urls or [])]
+            }
+            for section in sorted_sections
+        ]
+    }
+    return proposal_dict
+
+async def add_image_to_section(db: AsyncSession, section_id: int, image: schemas.ImageCreate) -> models.Section:
+    section = await get_section(db, section_id)
+    if not section:
+        return None
+    
+    # Initialize image_urls if it's None
+    if section.image_urls is None:
+        section.image_urls = []
+    
+    section.image_urls.append(image.url)
+    db.add(section)
+    await db.commit()
+    await db.refresh(section)
+    return section
+
+
+async def get_proposals(db: AsyncSession, skip: int = 0, limit: int = 100) -> List[models.Proposal]:
+    result = await db.execute(select(models.Proposal).offset(skip).limit(limit))
+    return result.scalars().all()
+
+
+async def create_proposal(db: AsyncSession, proposal: schemas.ProposalCreate) -> models.Proposal:
+    db_proposal = models.Proposal(**proposal.model_dump())
+    db.add(db_proposal)
+    await db.commit()
+    await db.refresh(db_proposal)
+    return await get_proposal(db, db_proposal.id)
+
+async def update_proposal(db: AsyncSession, proposal_id: int, proposal: schemas.ProposalUpdate) -> Optional[dict]:
+    result = await db.execute(select(models.Proposal).filter(models.Proposal.id == proposal_id))
+    db_proposal = result.scalar_one_or_none()
+    if not db_proposal:
+        return None
+    update_data = proposal.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_proposal, key, value)
+    db.add(db_proposal)
+    await db.commit()
+    await db.refresh(db_proposal)
+    return await get_proposal(db, db_proposal.id)
+
+
+# ---------------------------------------------------------------------------
+# SECTION CRUD
+# ---------------------------------------------------------------------------
+
+async def get_section(db: AsyncSession, section_id: int) -> Optional[models.Section]:
+    result = await db.execute(
+        select(models.Section)
+        .filter(models.Section.id == section_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_section(db: AsyncSession, proposal_id: int, section: schemas.SectionCreate, order: Optional[int] = None) -> models.Section:
+    # If an order is specified, shift existing sections to make space
+    if order is not None:
+        # Fetch all sections for the proposal that have an order >= the new order
+        sections_to_shift_result = await db.execute(
+            select(models.Section)
+            .where(models.Section.proposal_id == proposal_id)
+            .where(models.Section.order >= order)
+        )
+        sections_to_shift = sections_to_shift_result.scalars().all()
+
+        # Increment their order by 1
+        for s in sections_to_shift:
+            s.order += 1
+            db.add(s)
+        await db.flush() # Flush to ensure order changes are reflected before adding new section
+
+    # If order was not provided, determine it (should be handled by the endpoint now, but as a fallback)
+    if order is None:
+        existing_sections_result = await db.execute(
+            select(models.Section.order)
+            .where(models.Section.proposal_id == proposal_id)
+            .order_by(models.Section.order.desc())
+            .limit(1)
+        )
+        max_order = existing_sections_result.scalar_one_or_none()
+        order = (max_order if max_order is not None else 0) + 1
+
+    section_data = section.model_dump(exclude={"order"})
+    # Convert optional images list to image_urls if provided, and drop unsupported field
+    images_value = section_data.pop("images", None)
+    if images_value and isinstance(images_value, list):
+        try:
+            section_data["image_urls"] = [
+                (img["url"] if isinstance(img, dict) else str(img)) for img in images_value
+            ]
+        except Exception:
+            # Fallback: ignore invalid images payloads
+            pass
+    db_section = models.Section(**section_data, proposal_id=proposal_id, order=order)
+    db.add(db_section)
+    await db.commit()
+    await db.refresh(db_section)
+    return db_section
+
+
+async def update_section(db: AsyncSession, section_id: int, section: schemas.SectionUpdate) -> Optional[models.Section]:
+    db_section = await get_section(db, section_id)
+    if not db_section:
+        logging.warning(f"Section with ID {section_id} not found for update.")
+        return None
+    update_data = section.model_dump(exclude_unset=True)
+    # If client sent images array of objects, convert to image_urls and drop images
+    images_value = update_data.pop("images", None)
+    if images_value and isinstance(images_value, list):
+        try:
+            update_data["image_urls"] = [
+                (img.get("url") if isinstance(img, dict) else str(img)) for img in images_value
+            ]
+        except Exception:
+            pass
     for key, value in update_data.items():
         setattr(db_section, key, value)
-
     db.add(db_section)
-    db.commit()
-    db.refresh(db_section)
+    await db.commit()
+    await db.refresh(db_section)
     return db_section
 
-def update_section_content(db: Session, section_id: int, content: str):
-    db_section = db.query(models.Section).filter(models.Section.id == section_id).first()
-    if not db_section:
-        return None
 
-    db.refresh(db_section)
-
-    # Re-fetch the section with all its relationships loaded
-    return db.query(models.Section).options(selectinload(models.Section.images)).filter(models.Section.id == section_id).first()
-
-def delete_section(db: Session, section_id: int):
-    db_section = get_section(db, section_id)
+async def delete_section(db: AsyncSession, section_id: int) -> Optional[models.Section]:
+    db_section = await get_section(db, section_id)
     if db_section:
-        db.delete(db_section)
-        db.commit()
+        await db.delete(db_section)
+        await db.commit()
     return db_section
 
-def reorder_sections(db: Session, reorder_requests: List[schemas.ReorderSection]):
+
+async def delete_sections_by_proposal_id(db: AsyncSession, proposal_id: int) -> None:
+    await db.execute(models.Section.__table__.delete().where(models.Section.proposal_id == proposal_id))
+    await db.commit()
+
+
+async def reorder_sections(db: AsyncSession, reorder_requests: List[schemas.ReorderSection]) -> bool:
     for reorder_request in reorder_requests:
-        db_section = get_section(db, reorder_request.sectionId)
+        db_section = await get_section(db, reorder_request.sectionId)
         if db_section:
             db_section.order = reorder_request.newOrder
-    db.commit()
+    await db.commit()
     return True
 
-def get_section_versions(db: Session, section_id: int):
-    return db.query(models.SectionVersion).filter(models.SectionVersion.section_id == section_id).all()
 
-def revert_section(db: Session, section_id: int, version_id: int):
-    version = db.query(models.SectionVersion).filter(models.SectionVersion.id == version_id).first()
-    if version and version.section_id == section_id:
-        db_section = get_section(db, section_id)
-        if db_section:
-            # Create a new version with the current content before reverting
-            current_version = models.SectionVersion(
-                contentHtml=db_section.contentHtml,
-                section_id=db_section.id
-            )
-            db.add(current_version)
-
-            db_section.contentHtml = version.contentHtml
-            db.commit()
-            db.refresh(db_section)
-            return db_section
-    return None
-
-def add_image_to_section(db: Session, proposal_id: int, section_id: int, image_url: str):
-    db_section = db.query(models.Section).filter(models.Section.id == section_id, models.Section.proposal_id == proposal_id).first()
-    if db_section:
-        db_image = models.Image(url=image_url, section_id=section_id)
-        db.add(db_image)
-        db.commit()
-        db.refresh(db_image)
-        return db_image
-    return None
-
-def remove_image_from_section(db: Session, proposal_id: int, section_id: int, image_url: str):
-    db_section = db.query(models.Section).filter(models.Section.id == section_id, models.Section.proposal_id == proposal_id).first()
-    if db_section:
-        db_image = db.query(models.Image).filter(models.Image.section_id == section_id, models.Image.url == image_url).first()
-        if db_image:
-            db.delete(db_image)
-            db.commit()
-            return db_image
-    return None
-
-def update_image_placement(db: Session, section_id: int, image_placement: str):
-    db_section = get_section(db, section_id)
-    if db_section:
-        db_section.image_placement = image_placement
-        db.commit()
-        db.refresh(db_section)
-        return db_section
-    return None
-
-def update_proposal_css(db: Session, proposal_id: int, css: str):
-    db_proposal = get_proposal(db, proposal_id)
-    if db_proposal:
-        db_proposal.custom_css = css
-        db.commit()
-        db.refresh(db_proposal)
-        return db_proposal
-    return None
-
-def get_custom_logo(db: Session, logo_id: int):
-    return db.query(models.CustomLogo).filter(models.CustomLogo.id == logo_id).first()
-
-def get_custom_logos(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.CustomLogo).offset(skip).limit(limit).all()
-
-def create_custom_logo(db: Session, logo: schemas.CustomLogoCreate):
-    db_logo = models.CustomLogo(**logo.model_dump())
-    db.add(db_logo)
-    db.commit()
-    db.refresh(db_logo)
-    return db_logo
-
-def delete_custom_logo(db: Session, logo_id: int):
-    db_logo = get_custom_logo(db, logo_id)
-    if db_logo:
-        db.delete(db_logo)
-        db.commit()
-    return db_logo

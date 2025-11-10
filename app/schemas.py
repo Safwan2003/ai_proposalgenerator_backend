@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Union
+from typing import List, Optional, Dict
+from pydantic import BaseModel
 from datetime import date, datetime
 from enum import Enum
 
@@ -20,49 +20,51 @@ class Image(BaseModel):
     class Config:
         from_attributes = True
 
-class SectionVersion(BaseModel):
+class ImageCreate(BaseModel):
+    url: str
+    alt: Optional[str] = None
+    placement: Optional[str] = None
+
+class ImageDelete(BaseModel):
     id: int
-    contentHtml: str
-    created_at: datetime
 
-    class Config:
-        from_attributes = True
+class UserImageBase(BaseModel):
+    url: str
 
-class TechLogo(BaseModel):
-    name: str
-    logo_url: str
-
-class CustomLogoBase(BaseModel):
-    name: str
-    logo_url: str
-
-class CustomLogoCreate(CustomLogoBase):
+class UserImageCreate(UserImageBase):
     pass
 
-class CustomLogo(CustomLogoBase):
+class UserImage(UserImageBase):
     id: int
 
     class Config:
         from_attributes = True
+
+class ImageDisplay(BaseModel):
+    id: int
+    url: str
+    alt: Optional[str] = None
+    placement: Optional[str] = None
 
 class SectionBase(BaseModel):
     title: str
-    contentHtml: str
+    contentHtml: Optional[str] = None
+    order: Optional[int] = None
+    image_urls: Optional[List[str]] = []  # Raw list persisted in DB
+    images: Optional[List[ImageDisplay]] = []  # Derived / transformed list with metadata
     image_placement: Optional[str] = None
     mermaid_chart: Optional[str] = None
-    layout: Optional[str] = None
+    chart_type: Optional[str] = None
+    tech_logos: Optional[List[Dict]] = []
+    custom_logos: Optional[List[Dict]] = []
+
 
 class SectionCreate(SectionBase):
-    images: List[ImageObject] = []
-    tech_logos: List[TechLogo] = []
+    order: Optional[int] = None
 
 class Section(SectionBase):
     id: int
-    image_urls: List[str]
-    versions: List[SectionVersion] = []
-    mermaid_chart: Optional[str] = None
-    layout: Optional[str] = None
-    tech_logos: List[TechLogo] = Field(default_factory=list, alias="tech_logos_list")
+    proposal_id: int
 
     class Config:
         from_attributes = True
@@ -82,11 +84,34 @@ class ProposalBase(BaseModel):
 class ProposalCreate(ProposalBase):
     pass
 
+class ProposalUpdate(BaseModel):
+    clientName: Optional[str] = None
+    rfpText: Optional[str] = None
+    totalAmount: Optional[float] = None
+    paymentType: Optional[PaymentType] = None
+    numDeliverables: Optional[int] = None
+    startDate: Optional[date] = None
+    endDate: Optional[date] = None
+    companyName: Optional[str] = None
+    companyLogoUrl: Optional[str] = None
+    companyContact: Optional[str] = None
+
+class Proposal(ProposalBase):
+    id: int
+    sections: List[Section] = []
+    custom_css: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 class SectionUpdate(BaseModel):
     title: Optional[str] = None
     contentHtml: Optional[str] = None
+    image_urls: Optional[List[str]] = None
+    images: Optional[List[ImageDisplay]] = None  # Accept images if frontend sends objects; converted to image_urls in CRUD
     image_placement: Optional[str] = None
     mermaid_chart: Optional[str] = None
+    chart_type: Optional[str] = None
     layout: Optional[str] = None
 
 class ReorderSection(BaseModel):
@@ -97,43 +122,23 @@ class GenerateContentRequest(BaseModel):
     section_id: int
     keywords: str
 
+class GenerateProposalDraftRequest(BaseModel):
+    sections: List[str]
+
+class GenerateChartForSectionRequest(BaseModel):
+    section_id: int
+    description: str
+    chart_type: str
+
 class DesignTheme(BaseModel):
     prompt: str
     tokens: dict
 
 
 
-class Proposal(ProposalBase):
-    id: int
-    sections: List[Section] = []
-    custom_css: Optional[str] = None
-    design_themes: List[DesignTheme] = []
-    tech_stack: Optional[List[TechLogo]] = None # Add tech_stack to Proposal schema
-
-    class Config:
-        from_attributes = True
-
-class ImageCreate(BaseModel):
-    url: str
-
-class ImageDelete(BaseModel):
-    url: str
-
-class GenerateChartRequest(BaseModel):
-    description: str
-    chart_type: str # 'flowchart' or 'gantt'
-
-class UpdateChartRequest(BaseModel):
-    prompt: str
-    current_chart_code: str
-
-class GenerateChartForSectionRequest(BaseModel):
-    description: str
-    chart_type: str
-
-class LiveCustomizeRequest(BaseModel):
-    prompt: str
-
-class EnhanceRequest(BaseModel):
-    action: str
-    tone: str
+class EnhanceSectionRequest(BaseModel):
+    section_id: int
+    enhancement_type: str
+    instructions: Optional[str] = None
+    tone: Optional[str] = "professional"
+    focus_points: Optional[List[str]] = None

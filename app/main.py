@@ -2,23 +2,37 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from starlette.middleware.cors import CORSMiddleware
-from starlette.staticfiles import StaticFiles
-from starlette.responses import FileResponse
+from fastapi.responses import JSONResponse
+
 from .api.v1.api import api_router
 from .core.config import settings
-from .database import Base, engine
+from .database import Base, engine, AsyncSessionLocal
 
-Base.metadata.drop_all(bind=engine)
-Base.metadata.create_all(bind=engine)
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
-# Set all CORS enabled origins
+# Exception Handlers
+@app.exception_handler(ValueError)
+async def value_error_exception_handler(request: Request, exc: ValueError):
+    return JSONResponse(
+        status_code=404,
+        content={"message": str(exc)},
+    )
+
+# Event Handlers
+@app.on_event("startup")
+async def on_startup():
+    await init_db()
+
+# CORS
 if settings.BACKEND_CORS_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
@@ -28,21 +42,12 @@ if settings.BACKEND_CORS_ORIGINS:
         allow_headers=["*"],
     )
 
+# Routers
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
-# Construct the absolute path to the temp directory
+# Temp Directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_DIR = os.path.join(BASE_DIR, "..", "temp")
 
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR, exist_ok=True)
-
-app.mount("/exports", StaticFiles(directory=TEMP_DIR), name="exports")
-
-@app.get("/exports/{file_name:path}")
-async def serve_export_file(file_name: str):
-    file_path = os.path.join(TEMP_DIR, file_name)
-    if os.path.exists(file_path):
-        return FileResponse(file_path)
-    else:
-        raise HTTPException(status_code=404, detail="File not found")

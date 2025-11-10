@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
+from app.api.v1.endpoints import diagrams
+
 router = APIRouter()
 
-# All chart-related AI endpoints have been consolidated into the
-# generic /ai-task endpoint in proposals.py.
+router.include_router(diagrams.router, prefix="/diagrams", tags=["diagrams"])

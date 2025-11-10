@@ -1,19 +1,39 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.orm import declarative_base
 
-SQLALCHEMY_DATABASE_URL = "mysql+mysqlconnector://root:@localhost:3306/proposal_generator"
+from .core.config import settings
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL
+SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
+
+engine = create_async_engine(
+    SQLALCHEMY_DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=3600, # Recycle connections every hour
+    echo=False # Set to True to see generated SQL statements
 )
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+AsyncSessionLocal = async_sessionmaker(
+    autocommit=False, 
+    autoflush=False, 
+    bind=engine,
+    class_=AsyncSession
+)
 
 Base = declarative_base()
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+
+def as_dict(self):
+    return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
+Base.as_dict = as_dict
+
+from fastapi import Request
+
+async def get_db() -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()

@@ -7,10 +7,12 @@ pydantic-settings
 xhtml2pdf
 SQLAlchemy
 mysql-connector-python
+asyncmy
 python-docx
 html2docx
 markdown2
 json-repair
-autogen
-tavily-python
 openai
+pytest
+httpx
+thefuzz
