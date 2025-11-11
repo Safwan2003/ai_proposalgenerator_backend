@@ -99,7 +99,6 @@ class ProposalUpdate(BaseModel):
 class Proposal(ProposalBase):
     id: int
     sections: List[Section] = []
-    custom_css: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -129,12 +128,6 @@ class GenerateChartForSectionRequest(BaseModel):
     section_id: int
     description: str
     chart_type: str
-
-class DesignTheme(BaseModel):
-    prompt: str
-    tokens: dict
-
-
 
 class EnhanceSectionRequest(BaseModel):
     section_id: int

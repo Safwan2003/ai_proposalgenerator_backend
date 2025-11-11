@@ -91,7 +91,6 @@ async def get_proposal(db: AsyncSession, proposal_id: int) -> Optional[dict]:
         "companyName": proposal.companyName,
         "companyLogoUrl": proposal.companyLogoUrl,
         "companyContact": proposal.companyContact,
-        "custom_css": proposal.custom_css,
         "sections": [
             {
                 "id": section.id,

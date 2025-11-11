@@ -20,7 +20,6 @@ class Proposal(Base):
     companyName = Column(String(255))
     companyLogoUrl = Column(String(255))
     companyContact = Column(String(255))
-    custom_css = Column(Text, nullable=True)
 
     sections = relationship("Section", back_populates="proposal", cascade="all, delete-orphan")
 
